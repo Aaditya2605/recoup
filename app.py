@@ -24,10 +24,12 @@ from recoup import (
     dodo_checkout,
     eligibility,
     now,
+    resend_email,
     run_audit,
     synthetic_documents,
     terac_budget_ok,
     verify_dodo_signature,
+    valid_email,
 )
 
 
@@ -208,7 +210,7 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as db:
                     cases = [dict(row) for row in db.execute("SELECT id,tenant,email,state,synthetic,paid,created_at,updated_at FROM cases ORDER BY created_at DESC")]
                     cycles = [{**dict(row), "data": json.loads(row["data"])} for row in db.execute("SELECT * FROM distribution_cycles ORDER BY created_at DESC")]
-                return self.json(200, {"cases": cases, "distribution_cycles": cycles, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
+                return self.json(200, {"cases": cases, "distribution_cycles": cycles, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "email_configured": bool(os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
             match = re_full(r"/api/cases/([a-f0-9]+)", path)
             if match:
                 with connect() as db:
@@ -253,12 +255,14 @@ class Handler(BaseHTTPRequestHandler):
             "state": "intake_incomplete",
             "synthetic": False,
             "paid": False,
-            "data": {"eligibility": check, "documents": documents, "contact": payload.get("landlord_contact", "")},
+            "data": {"eligibility": check, "documents": documents, "landlord_email": str(payload.get("landlord_email", "")).strip()},
             "created_at": now(),
             "updated_at": now(),
         }
-        if not case["tenant"] or "@" not in case["email"]:
-            raise FailedClosed("Tenant name and a valid email are required.")
+        if not case["tenant"] or not valid_email(case["email"]):
+            raise FailedClosed("Tenant name and a valid contact email are required.")
+        if not valid_email(case["data"]["landlord_email"]):
+            raise FailedClosed("A valid landlord or manager email is required.")
         with connect() as db:
             db.execute("INSERT INTO cases VALUES(?,?,?,?,?,?,?,?,?)", (case["id"], case["tenant"], case["email"], case["state"], 0, 0, json.dumps(case["data"]), case["created_at"], case["updated_at"]))
             record_event(db, case_id=case_id, actor="customer", trigger="intake submitted", input_evidence={"document_kinds": list(documents)}, tool_call=None, output=check, decision="eligible" if check["eligible"] else "rejected", next_state=case["state"])
@@ -311,8 +315,20 @@ class Handler(BaseHTTPRequestHandler):
                     raise FailedClosed("A typed signature and attestation are required.")
                 case["data"]["signature"] = signature
                 queued = action(db, case, "certified_mail", {"notice": case["data"]["result"]["draft_notice"], "signature": signature})
+                landlord_email = case["data"].get("landlord_email")
+                email_action = None
+                if landlord_email:
+                    email_action = action(db, case, "resend_email", {"to": landlord_email, "subject": f"CAM reconciliation notice from {case['tenant']}", "delivery_role": "courtesy_copy"})
+                    email_id = resend_email(
+                        landlord_email,
+                        f"CAM reconciliation notice from {case['tenant']}",
+                        f"{case['data']['result']['draft_notice']}\n\nSigned by: {signature['name']}\nSigned at: {signature['at']}",
+                        f"recoup-notice-{case_id}",
+                    )
+                    db.execute("UPDATE actions SET status='accepted_external',external_evidence=? WHERE id=?", (json.dumps({"provider": "Resend", "email_id": email_id}), email_action["id"]))
+                    record_event(db, case_id=case_id, actor="fulfillment_agent", trigger="courtesy email accepted by Resend", input_evidence={"recipient": landlord_email}, tool_call={"action_id": email_action["id"], "provider": "Resend"}, output={"email_id": email_id}, decision="accepted; certified delivery still required", next_state=case["state"])
                 save_case(db, case)
-                transition(db, case, "external_action_pending", actor="fulfillment_agent", trigger="customer signed notice", evidence=signature, tool={"action_id": queued["id"]}, output={"external_status": "pending_external"}, decision="queued, not sent")
+                transition(db, case, "external_action_pending", actor="fulfillment_agent", trigger="customer signed notice", evidence=signature, tool={"certified_mail_action_id": queued["id"], "email_action_id": email_action["id"] if email_action else None}, output={"email_status": "accepted_external" if email_action else "not_requested", "certified_mail_status": "pending_external"}, decision="courtesy email accepted; certified mail queued, not sent" if email_action else "certified mail queued, not sent")
             elif verb == "deliver":
                 if case["state"] != "external_action_pending":
                     raise FailedClosed("No notice is waiting for external delivery evidence.")

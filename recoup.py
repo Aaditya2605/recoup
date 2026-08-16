@@ -33,6 +33,10 @@ TERMINAL_STATES = {
 }
 
 
+def valid_email(value: object) -> bool:
+    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", str(value).strip()))
+
+
 class FailedClosed(ValueError):
     """The workflow cannot proceed safely from the available evidence."""
 
@@ -419,6 +423,40 @@ def choose_distribution_strategy(state: dict[str, Any]) -> dict[str, Any]:
 
 def terac_budget_ok(available_cents: int, committed_cents: int, quote_cents: int) -> bool:
     return quote_cents >= 0 and committed_cents + quote_cents <= min(available_cents, 12_500)
+
+
+def resend_email(to: str, subject: str, text: str, idempotency_key: str) -> str:
+    key = os.getenv("RESEND_API_KEY")
+    sender = os.getenv("RESEND_FROM_EMAIL")
+    if not key or not sender:
+        raise FailedClosed("Resend API key and sender email are required.")
+    if not valid_email(to):
+        raise FailedClosed("A valid landlord email is required.")
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps({"from": sender, "to": [to], "subject": subject, "text": text}).encode(),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotency_key,
+            "User-Agent": "Recoup/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("message", str(exc))
+        except json.JSONDecodeError:
+            detail = str(exc)
+        raise FailedClosed(f"Resend email failed: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise FailedClosed(f"Resend email failed: {exc}") from exc
+    if not result.get("id"):
+        raise FailedClosed("Resend returned an incomplete email response.")
+    return str(result["id"])
 
 
 def dodo_checkout(case_id: str, tenant: str, email: str) -> dict[str, Any]:

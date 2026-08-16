@@ -2,9 +2,10 @@ import json
 import hmac
 import base64
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
-from recoup import FailedClosed, calculate_audit, evidence, money, ratio, run_audit, synthetic_documents, synthetic_extraction, terac_budget_ok, verify_dodo_signature
+from recoup import FailedClosed, calculate_audit, evidence, money, ratio, resend_email, run_audit, synthetic_documents, synthetic_extraction, terac_budget_ok, valid_email, verify_dodo_signature
 
 
 class RecoupTest(unittest.TestCase):
@@ -49,6 +50,20 @@ class RecoupTest(unittest.TestCase):
     def test_model_number_formats(self):
         self.assertEqual(str(ratio("4.2%")), "0.042")
         self.assertEqual(str(money("$14,400.00")), "14400.00")
+
+    @patch("recoup.urllib.request.urlopen")
+    def test_resend_email(self, urlopen):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"id":"email_test"}'
+        urlopen.return_value = response
+        with patch.dict("os.environ", {"RESEND_API_KEY": "re_test", "RESEND_FROM_EMAIL": "Recoup <onboarding@resend.dev>"}):
+            self.assertEqual(resend_email("landlord@example.com", "Notice", "Body", "case-test"), "email_test")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(json.loads(request.data)["to"], ["landlord@example.com"])
+        self.assertEqual(request.headers["Idempotency-key"], "case-test")
+        self.assertTrue(valid_email("landlord@example.com"))
+        self.assertFalse(valid_email("not-an-email"))
 
 
 if __name__ == "__main__":

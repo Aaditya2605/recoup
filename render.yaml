@@ -26,6 +26,10 @@ services:
         value: test_mode
       - key: DODO_PAYMENTS_RETURN_URL
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
     disk:
       name: recoup-data
       mountPath: /var/data
