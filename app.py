@@ -55,8 +55,16 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+class Connection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
-    db = sqlite3.connect(DB)
+    db = sqlite3.connect(DB, factory=Connection)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     return db
@@ -234,9 +242,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self.static("study.html")
             if path in {"/app.js", "/study.js", "/styles.css", "/redesign.css"}:
                 return self.static(path[1:])
+            if path == "/api/demo":
+                documents = synthetic_documents()
+                return self.json(200, {
+                    "tenant": "Synthetic Market Street Tenant",
+                    "email": "demo@example.com",
+                    "country": "US",
+                    "lease_type": "NNN retail",
+                    "landlord_email": "manager@example.com",
+                    "landlord_phone": "",
+                    "documents": [
+                        {"kind": kind, "name": f"sample-{kind}.txt", "base64": base64.b64encode(text.encode()).decode()}
+                        for kind, text in documents.items()
+                    ],
+                })
             if path == "/api/state":
                 with connect() as db:
-                    cases = [dict(row) for row in db.execute("SELECT id,tenant,email,state,synthetic,paid,created_at,updated_at FROM cases ORDER BY created_at DESC")]
+                    cases = []
+                    for row in db.execute("SELECT id,tenant,email,state,synthetic,paid,data,created_at,updated_at FROM cases ORDER BY created_at DESC"):
+                        item = dict(row)
+                        item["archived"] = bool(json.loads(item.pop("data")).get("archived"))
+                        cases.append(item)
                     cycles = [{**dict(row), "data": json.loads(row["data"])} for row in db.execute("SELECT * FROM distribution_cycles ORDER BY created_at DESC")]
                     feedback_count = db.execute("SELECT COUNT(*) FROM study_responses").fetchone()[0]
                 return self.json(200, {"cases": cases, "distribution_cycles": cycles, "terac_feedback_count": feedback_count, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "email_configured": bool(os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL")), "linq_configured": bool(os.getenv("LINQ_API_KEY")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
@@ -262,11 +288,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_study_response(payload)
             if path == "/api/cases":
                 return self.create_case(payload)
-            if path == "/api/demo":
-                return self.create_demo()
             if path == "/api/distribution/cycles":
                 return self.create_cycle(payload)
-            match = re_full(r"/api/cases/([a-f0-9]+)/(audit|authorize|sign|deliver|followup|reply|outcome|pay)", path)
+            match = re_full(r"/api/cases/([a-f0-9]+)/(audit|authorize|sign|deliver|followup|reply|outcome|pay|archive|restore)", path)
             if match:
                 return self.case_action(match[1], match[2], payload)
             self.send_error(404)
@@ -277,18 +301,30 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.json(500, {"error": str(exc)})
 
+    def do_DELETE(self) -> None:
+        match = re_full(r"/api/cases/([a-f0-9]+)", urlparse(self.path).path)
+        if not match:
+            return self.send_error(404)
+        try:
+            self.delete_case(match[1])
+        except KeyError:
+            self.json(404, {"error": "Case not found."})
+        except Exception as exc:
+            self.json(500, {"error": str(exc)})
+
     def create_case(self, payload: dict) -> None:
         case_id = uuid.uuid4().hex
         documents = dict(decode_document(case_id, item) for item in payload.get("documents", []))
+        synthetic = payload.get("synthetic") is True and documents == synthetic_documents()
         check = eligibility({**payload, "document_kinds": list(documents)})
         case = {
             "id": case_id,
             "tenant": str(payload.get("tenant", "")).strip(),
             "email": str(payload.get("email", "")).strip(),
             "state": "intake_incomplete",
-            "synthetic": False,
+            "synthetic": synthetic,
             "paid": False,
-            "data": {"eligibility": check, "documents": documents, "landlord_email": str(payload.get("landlord_email", "")).strip(), "landlord_phone": str(payload.get("landlord_phone", "")).strip()},
+            "data": {"eligibility": check, "documents": documents, "landlord_email": str(payload.get("landlord_email", "")).strip(), "landlord_phone": str(payload.get("landlord_phone", "")).strip(), **({"contact": "Synthetic Property Manager", "model_mode": "live"} if synthetic else {})},
             "created_at": now(),
             "updated_at": now(),
         }
@@ -299,23 +335,21 @@ class Handler(BaseHTTPRequestHandler):
         if case["data"]["landlord_phone"] and not valid_phone(case["data"]["landlord_phone"]):
             raise FailedClosed("The landlord phone must use E.164 format, such as +14155550123.")
         with connect() as db:
-            db.execute("INSERT INTO cases VALUES(?,?,?,?,?,?,?,?,?)", (case["id"], case["tenant"], case["email"], case["state"], 0, 0, json.dumps(case["data"]), case["created_at"], case["updated_at"]))
-            record_event(db, case_id=case_id, actor="customer", trigger="intake submitted", input_evidence={"document_kinds": list(documents)}, tool_call=None, output=check, decision="eligible" if check["eligible"] else "rejected", next_state=case["state"])
+            db.execute("INSERT INTO cases VALUES(?,?,?,?,?,?,?,?,?)", (case["id"], case["tenant"], case["email"], case["state"], int(synthetic), 0, json.dumps(case["data"]), case["created_at"], case["updated_at"]))
+            record_event(db, case_id=case_id, actor="system" if synthetic else "customer", trigger="synthetic evaluation submitted" if synthetic else "intake submitted", input_evidence={"document_kinds": list(documents)}, tool_call=None, output=check, decision="accepted for local evaluation only" if synthetic else "eligible" if check["eligible"] else "rejected", next_state=case["state"])
         self.json(201, {"id": case_id, "eligibility": check})
-
-    def create_demo(self) -> None:
-        case_id = uuid.uuid4().hex
-        created = now()
-        data = {"eligibility": eligibility({"country": "US", "lease_type": "NNN retail", "document_kinds": ["lease", "reconciliation", "ledger"]}), "documents": synthetic_documents(), "contact": "Synthetic Property Manager", "model_mode": "live"}
-        with connect() as db:
-            db.execute("INSERT INTO cases VALUES(?,?,?,?,?,?,?,?,?)", (case_id, "Synthetic Market Street Tenant", "demo@example.invalid", "intake_incomplete", 1, 0, json.dumps(data), created, created))
-            record_event(db, case_id=case_id, actor="system", trigger="synthetic evaluation loaded", input_evidence={"label": "synthetic"}, tool_call=None, output={"documents": list(data["documents"])}, decision="accepted for local evaluation only", next_state="intake_incomplete")
-        self.json(201, {"id": case_id})
 
     def case_action(self, case_id: str, verb: str, payload: dict) -> None:
         with connect() as db:
             case = get_case(db, case_id)
-            if verb == "audit":
+            if case["data"].get("archived") and verb != "restore":
+                raise FailedClosed("Restore the case before taking another action.")
+            if verb in {"archive", "restore"}:
+                archived = verb == "archive"
+                case["data"]["archived"] = archived
+                save_case(db, case)
+                record_event(db, case_id=case_id, actor="operator", trigger=f"case {verb}d", input_evidence={}, tool_call=None, output={"archived": archived}, decision="accepted", next_state=case["state"])
+            elif verb == "audit":
                 if not case["data"]["eligibility"]["eligible"]:
                     raise FailedClosed("The case is not eligible for version 1.")
                 if not case["synthetic"] and not case["paid"]:
@@ -418,6 +452,20 @@ class Handler(BaseHTTPRequestHandler):
                 queued = action(db, case, "dodo_checkout", {"url": checkout["checkout_url"], "session_id": checkout["session_id"], "amount_cents": 49900})
                 record_event(db, case_id=case_id, actor="payment_agent", trigger="eligible customer requested checkout", input_evidence=case["data"]["eligibility"], tool_call={"action_id": queued["id"], "provider": "Dodo Payments"}, output={"payment_link": checkout["checkout_url"], "session_id": checkout["session_id"], "status": "pending_external"}, decision="checkout created, payment not confirmed", next_state=case["state"])
             self.json(200, get_case(db, case_id))
+
+    def delete_case(self, case_id: str) -> None:
+        with connect() as db:
+            get_case(db, case_id)
+            db.execute("DELETE FROM actions WHERE case_id=?", (case_id,))
+            db.execute("DELETE FROM events WHERE case_id=?", (case_id,))
+            db.execute("DELETE FROM cases WHERE id=?", (case_id,))
+        deleted = UPLOADS / ".deleted" / case_id
+        files = list(UPLOADS.glob(f"{case_id}-*"))
+        if files:
+            deleted.mkdir(parents=True, exist_ok=True)
+            for source in files:
+                source.replace(deleted / source.name)
+        self.json(200, {"deleted": True, "id": case_id})
 
     def dodo_webhook(self) -> None:
         secret = os.getenv("DODO_PAYMENTS_WEBHOOK_KEY")

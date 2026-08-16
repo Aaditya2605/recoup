@@ -16,7 +16,7 @@
     <section id="cases-view">
       <div class="intro">
         <div><p class="eyebrow">Managed CAM reconciliation</p><h1>Find and recover CAM charges your lease does not allow.</h1><p>Upload your lease and CAM statement. Recoup verifies charges, protects deadlines, and runs the correction.</p></div>
-        <div class="hero-actions"><a class="primary" href="#intake">Check eligibility</a><button id="demo" class="secondary">Run sample case</button></div>
+        <div class="hero-actions"><a class="primary" href="#intake">Check eligibility</a><button id="demo" class="secondary">Fill sample case</button></div>
       </div>
       <div class="workspace-grid">
         <form id="intake" class="panel">
@@ -30,7 +30,7 @@
           <p id="intake-error" class="form-error" role="alert"></p>
           <button class="primary" type="submit">Check eligibility</button>
         </form>
-        <section class="panel cases-panel"><div class="panel-head"><div><h2>Active cases</h2><p>Review evidence, deadlines, and next actions.</p></div><span id="case-count">0 cases</span></div><div id="cases" class="list loading">Loading cases</div></section>
+        <section class="panel cases-panel"><div class="panel-head"><div><h2 id="case-list-title">Active cases</h2><p>Review evidence, deadlines, and next actions.</p></div><span id="case-count">0 cases</span></div><div class="case-filters" aria-label="Case status"><button class="quiet active" data-case-filter="active" aria-pressed="true">Active</button><button class="quiet" data-case-filter="archived" aria-pressed="false">Archived</button></div><div id="cases" class="list loading">Loading cases</div></section>
       </div>
       <section id="case-detail" class="panel detail hidden"></section>
     </section>

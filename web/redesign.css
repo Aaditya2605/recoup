@@ -53,6 +53,9 @@ input, select { min-height: 44px; border-color: #47504b; border-radius: 10px; ba
 input:hover, select:hover { border-color: #66716b; }
 input::file-selector-button { margin-right: 10px; border: 0; border-radius: 7px; background: var(--surface-raised); color: var(--text); padding: 7px 9px; }
 .form-error { min-height: 22px; margin: 0 0 8px; color: var(--danger); font-size: 13px; }
+.case-filters { display: flex; gap: 4px; margin: -8px 0 14px; }
+.danger { border-color: var(--danger); color: var(--danger); }
+.danger:hover { border-color: var(--danger); background: var(--danger-bg); color: var(--danger); }
 
 .list.empty, .list.loading { min-height: 250px; place-items: center; color: var(--muted); text-align: center; }
 .list.empty::before { content: "No open work"; display: block; color: var(--text); font-size: 19px; font-weight: 750; }

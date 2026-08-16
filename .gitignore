@@ -5,4 +5,5 @@ __pycache__/
 recoup.db
 recoup.db-*
 uploads/
+backups/
 .DS_Store
