@@ -165,27 +165,41 @@ def synthetic_extraction() -> dict[str, Any]:
         "objection_days": e(60, "Tenant may object within 60 calendar days after the statement date.", "lease", "Section 8.1"),
         "tenant_share": e("0.042", "Tenant's Proportionate Share is 4.2%.", "lease", "Section 6.2"),
         "claimed_share": e("0.048", "Tenant share used: 4.8%", "reconciliation", "line 9"),
-        "permitted_categories": e(["common-area maintenance", "insurance and utilities", "management fee"], "Common-area maintenance, insurance, utilities, and one management fee are permitted Operating Costs.", "lease", "Section 6.3"),
-        "excluded_categories": e(["structural roof replacement", "administrative fee"], "Structural roof replacement is excluded. An administrative fee is excluded when a management fee is also charged.", "lease", "Section 6.4"),
-        "gross_up": e({"allowed": True, "occupancy": "0.95"}, "Variable Operating Costs may be grossed up to 95% occupancy.", "lease", "Section 6.5"),
-        "expense_cap": e({"rate": "0.05", "cumulative": False, "compounding": False}, "Controllable Operating Costs may increase by no more than 5% per calendar year, non-cumulative and non-compounding.", "lease", "Section 6.6"),
-        "capital_rule": e("amortize over useful life at prime", "Permitted capital costs must be amortized over useful life with interest at the prime rate.", "lease", "Section 6.7"),
         "audit_rights": e({"independent_cpa": True, "contingency_allowed": False}, "Records review must be performed by an independent CPA paid on a non-contingent basis.", "lease", "Section 8.1"),
         "pay_first": e(True, "Tenant must pay the billed amount while a dispute is pending and may not offset rent.", "lease", "Section 8.2"),
-        "withholding_allowed": e(False, "Tenant must pay the billed amount while a dispute is pending and may not offset rent.", "lease", "Section 8.2"),
         "notice": e({"method": "certified_mail", "address": "100 Landlord Way, San Francisco, CA 94107"}, "Formal notice must be sent by certified mail to 100 Landlord Way, San Francisco, CA 94107.", "lease", "Section 8.3"),
-        "resolution_rule": e("credit overpayment; underpayment due in 30 days", "An overpayment must be credited against the next rent payment; an underpayment is due within 30 days.", "lease", "Section 8.4"),
         "claimed_expenses": e("300000.00", "Total claimed Operating Costs: $300,000.00", "reconciliation", "line 8"),
-        "permitted_expenses": e("250000.00", "Common-area maintenance: $200,000.00\nInsurance and utilities: $40,000.00\nManagement fee: $10,000.00", "reconciliation", "lines 3-5"),
-        "roof_expense": e("40000.00", "Structural roof replacement: $40,000.00", "reconciliation", "line 6"),
-        "admin_expense": e("10000.00", "Administrative fee: $10,000.00", "reconciliation", "line 7"),
         "claimed_actual": e("14400.00", "Tenant claimed actual CAM: $14,400.00", "reconciliation", "line 10"),
         "estimated_paid": e("12000.00", "Total estimated CAM paid: $12,000.00.", "ledger", "line 3"),
         "additional_bill": e("2400.00", "Additional amount billed: $2,400.00", "reconciliation", "line 12"),
+        "expense_items": [
+            {
+                "code": "permitted_operating_costs",
+                "title": "Permitted operating costs",
+                "claimed_amount": e("250000.00", "Common-area maintenance: $200,000.00\nInsurance and utilities: $40,000.00\nManagement fee: $10,000.00", "reconciliation", "lines 3-5"),
+                "permitted_amount": e("250000.00", "Common-area maintenance, insurance, utilities, and one management fee are permitted Operating Costs.", "lease", "Section 6.3"),
+            },
+            {
+                "code": "excluded_capital",
+                "title": "Excluded structural roof replacement",
+                "claimed_amount": e("40000.00", "Structural roof replacement: $40,000.00", "reconciliation", "line 6"),
+                "permitted_amount": e("0", "Structural roof replacement is excluded.", "lease", "Section 6.4"),
+            },
+            {
+                "code": "duplicate_admin",
+                "title": "Administrative fee charged with a management fee",
+                "claimed_amount": e("10000.00", "Administrative fee: $10,000.00", "reconciliation", "line 7"),
+                "permitted_amount": e("0", "An administrative fee is excluded when a management fee is also charged.", "lease", "Section 6.4"),
+            },
+        ],
     }
 
 
-REQUIRED_FIELDS = tuple(synthetic_extraction())
+REQUIRED_FIELDS = (
+    "statement_date", "objection_days", "tenant_share", "claimed_share",
+    "claimed_expenses", "claimed_actual", "estimated_paid", "additional_bill",
+    "expense_items", "audit_rights", "pay_first", "notice",
+)
 
 
 def validate_extraction(extracted: dict[str, Any]) -> dict[str, Any]:
@@ -193,7 +207,23 @@ def validate_extraction(extracted: dict[str, Any]) -> dict[str, Any]:
     if missing:
         raise FailedClosed("Missing extracted fields: " + ", ".join(missing))
     for field in REQUIRED_FIELDS:
+        if field == "expense_items":
+            continue
         require_evidence(extracted[field], field)
+    items = extracted["expense_items"]
+    if not isinstance(items, list) or not items:
+        raise FailedClosed("At least one expense item with evidence is required.")
+    codes: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or not item.get("code") or not item.get("title"):
+            raise FailedClosed(f"Expense item {index} needs a code and title.")
+        if item["code"] in codes:
+            raise FailedClosed(f"Duplicate expense item code: {item['code']}.")
+        codes.add(item["code"])
+        claimed = money(require_evidence(item.get("claimed_amount"), f"expense item {index} claimed amount")["value"])
+        permitted = money(require_evidence(item.get("permitted_amount"), f"expense item {index} permitted amount")["value"])
+        if claimed < 0 or permitted < 0 or permitted > claimed:
+            raise FailedClosed(f"Expense item {index} has invalid claimed or permitted amounts.")
     return extracted
 
 
@@ -202,44 +232,47 @@ def calculate_audit(extracted: dict[str, Any]) -> dict[str, Any]:
     share = ratio(x["tenant_share"]["value"])
     claimed_share = ratio(x["claimed_share"]["value"])
     claimed_expenses = money(x["claimed_expenses"]["value"])
-    permitted_expenses = money(x["permitted_expenses"]["value"])
-    roof = money(x["roof_expense"]["value"])
-    admin = money(x["admin_expense"]["value"])
     paid = money(x["estimated_paid"]["value"])
     claimed_actual = money(x["claimed_actual"]["value"])
     stated_bill = money(x["additional_bill"]["value"])
+    item_claimed = sum((money(item["claimed_amount"]["value"]) for item in x["expense_items"]), Decimal())
+    permitted_expenses = sum((money(item["permitted_amount"]["value"]) for item in x["expense_items"]), Decimal())
+    if item_claimed != claimed_expenses:
+        raise FailedClosed("The expense items do not equal the claimed expense total.")
     if (claimed_expenses * claimed_share).quantize(MONEY) != claimed_actual:
         raise FailedClosed("The reconciliation arithmetic conflicts with the extracted totals.")
     if claimed_actual - paid != stated_bill:
         raise FailedClosed("The stated additional bill does not reconcile with payments.")
     correct_actual = (permitted_expenses * share).quantize(MONEY)
     correct_balance = correct_actual - paid
-    findings = [
-        {
+    findings: list[dict[str, Any]] = []
+    allocation_amount = (claimed_expenses * (claimed_share - share)).quantize(MONEY)
+    if allocation_amount > 0:
+        findings.append({
             "code": "allocation_share",
             "title": "Incorrect tenant allocation percentage",
-            "amount": str((claimed_expenses * (claimed_share - share)).quantize(MONEY)),
+            "amount": str(allocation_amount),
             "lease_evidence": x["tenant_share"],
             "statement_evidence": x["claimed_share"],
-            "calculation": f"$300,000.00 × (4.8% − 4.2%) = $1,800.00",
-        },
-        {
-            "code": "excluded_capital",
-            "title": "Excluded structural roof replacement",
-            "amount": str((roof * share).quantize(MONEY)),
-            "lease_evidence": x["excluded_categories"],
-            "statement_evidence": x["roof_expense"],
-            "calculation": f"${roof:,.2f} × 4.2% = $1,680.00",
-        },
-        {
-            "code": "duplicate_admin",
-            "title": "Administrative fee charged with a management fee",
-            "amount": str((admin * share).quantize(MONEY)),
-            "lease_evidence": x["excluded_categories"],
-            "statement_evidence": x["admin_expense"],
-            "calculation": f"${admin:,.2f} × 4.2% = $420.00",
-        },
-    ]
+            "calculation": f"${claimed_expenses:,.2f} × ({claimed_share:.2%} − {share:.2%}) = ${allocation_amount:,.2f}",
+        })
+    for item in x["expense_items"]:
+        claimed = money(item["claimed_amount"]["value"])
+        permitted = money(item["permitted_amount"]["value"])
+        amount = ((claimed - permitted) * share).quantize(MONEY)
+        if amount <= 0:
+            continue
+        findings.append({
+            "code": item["code"],
+            "title": item["title"],
+            "amount": str(amount),
+            "lease_evidence": item["permitted_amount"],
+            "statement_evidence": item["claimed_amount"],
+            "calculation": f"(${claimed:,.2f} − ${permitted:,.2f}) × {share:.2%} = ${amount:,.2f}",
+        })
+    correction = claimed_actual - correct_actual
+    if correction > 0 and sum((money(item["amount"]) for item in findings), Decimal()) != correction:
+        raise FailedClosed("The finding corrections do not reconcile with the verified total.")
     return {
         "deadline": deadline(x["statement_date"], x["objection_days"]),
         "claimed_actual": str(claimed_actual),
@@ -247,7 +280,7 @@ def calculate_audit(extracted: dict[str, Any]) -> dict[str, Any]:
         "stated_balance": str(stated_bill),
         "verified_actual": str(correct_actual),
         "verified_balance": str(correct_balance),
-        "correction": str(claimed_actual - correct_actual),
+        "correction": str(correction),
         "outcome_if_accepted": "credit" if correct_balance < 0 else "corrected_bill",
         "findings": findings,
         "limits": ["Invoice-level testing requires landlord records.", "No jurisdiction-specific legal conclusion is made."],
@@ -273,7 +306,7 @@ def draft_notice(extracted: dict[str, Any], audit: dict[str, Any], tenant: str) 
     x = validate_extraction(extracted)
     lines = [
         "DRAFT — CUSTOMER SIGNATURE REQUIRED",
-        "Subject: Objection to 2025 CAM reconciliation",
+        "Subject: Objection to CAM reconciliation",
         "",
         f"The tenant, {tenant}, objects to the CAM reconciliation dated {x['statement_date']['value']}.",
         f"The verified calculation shows a ${money(audit['correction']):,.2f} correction.",
@@ -422,6 +455,23 @@ def choose_distribution_strategy(state: dict[str, Any]) -> dict[str, Any]:
         "human_job": human_job,
         "acceptance_rubric": ["specific to CAM reconciliation", "no legal or savings guarantee", "clear before-and-after rationale"],
         "next_decision": "measure qualified prospects, case starts, paid cases, and CAC before the next cycle",
+    }
+
+
+def choose_message_from_feedback(feedback: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(feedback) < 5:
+        raise FailedClosed(f"Five Terac study responses are required before the distribution manager can choose a message. Received {len(feedback)}.")
+    current_votes = sum(item["preference"] == "current" for item in feedback)
+    return {
+        "message_variant": "deadline" if current_votes < len(feedback) / 2 else "current",
+        "human_feedback": {
+            "source": "Terac",
+            "responses": len(feedback),
+            "current_votes": current_votes,
+            "deadline_votes": len(feedback) - current_votes,
+            "average_trust_current": round(sum(item["trust_current"] for item in feedback) / len(feedback), 2),
+            "average_trust_deadline": round(sum(item["trust_deadline"] for item in feedback) / len(feedback), 2),
+        },
     }
 
 

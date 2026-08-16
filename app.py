@@ -21,6 +21,7 @@ from recoup import (
     FailedClosed,
     TERMINAL_STATES,
     choose_distribution_strategy,
+    choose_message_from_feedback,
     dodo_checkout,
     eligibility,
     linq_send_message,
@@ -84,6 +85,12 @@ def init_db() -> None:
             );
             CREATE TABLE IF NOT EXISTS distribution_cycles (
               id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS study_responses (
+              submission_id TEXT PRIMARY KEY, terac_submission_id TEXT NOT NULL, task_id TEXT NOT NULL,
+              preference TEXT NOT NULL, clarity_current INTEGER NOT NULL, clarity_deadline INTEGER NOT NULL,
+              trust_current INTEGER NOT NULL, trust_deadline INTEGER NOT NULL,
+              concern TEXT NOT NULL, improvement TEXT NOT NULL, created_at TEXT NOT NULL
             );
             """
         )
@@ -207,13 +214,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 return self.static("index.html")
-            if path in {"/app.js", "/styles.css", "/redesign.css"}:
+            if path == "/study":
+                return self.static("study.html")
+            if path in {"/app.js", "/study.js", "/styles.css", "/redesign.css"}:
                 return self.static(path[1:])
             if path == "/api/state":
                 with connect() as db:
                     cases = [dict(row) for row in db.execute("SELECT id,tenant,email,state,synthetic,paid,created_at,updated_at FROM cases ORDER BY created_at DESC")]
                     cycles = [{**dict(row), "data": json.loads(row["data"])} for row in db.execute("SELECT * FROM distribution_cycles ORDER BY created_at DESC")]
-                return self.json(200, {"cases": cases, "distribution_cycles": cycles, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "email_configured": bool(os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL")), "linq_configured": bool(os.getenv("LINQ_API_KEY")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
+                    feedback_count = db.execute("SELECT COUNT(*) FROM study_responses").fetchone()[0]
+                return self.json(200, {"cases": cases, "distribution_cycles": cycles, "terac_feedback_count": feedback_count, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "email_configured": bool(os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL")), "linq_configured": bool(os.getenv("LINQ_API_KEY")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
             match = re_full(r"/api/cases/([a-f0-9]+)", path)
             if match:
                 with connect() as db:
@@ -232,6 +242,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/linq/webhook":
                 return self.linq_webhook()
             payload = self.read_json()
+            if path == "/api/study/responses":
+                return self.create_study_response(payload)
             if path == "/api/cases":
                 return self.create_case(payload)
             if path == "/api/demo":
@@ -456,7 +468,9 @@ class Handler(BaseHTTPRequestHandler):
     def create_cycle(self, payload: dict) -> None:
         with connect() as db:
             prior = [json.loads(row["data"]) for row in db.execute("SELECT data FROM distribution_cycles ORDER BY created_at")]
+            feedback = [dict(row) for row in db.execute("SELECT * FROM study_responses ORDER BY created_at")]
             strategy = choose_distribution_strategy({"prior_cycles": prior})
+            strategy.update(choose_message_from_feedback(feedback))
             available = int(payload.get("available_terac_cents", 12500))
             committed = sum(int(c.get("terac_cost_cents", 0)) for c in prior)
             quote = int(payload.get("terac_quote_cents", 0))
@@ -469,6 +483,22 @@ class Handler(BaseHTTPRequestHandler):
             db.execute("INSERT INTO distribution_cycles VALUES(?,?,?,?)", (cycle_id, "planned", json.dumps(strategy), now()))
             record_event(db, case_id=None, actor="distribution_manager", trigger="distribution cycle requested", input_evidence={"prior_cycles": len(prior), "budget_cents": available}, tool_call=None, output=strategy, decision="planned within policy", next_state="planned")
         self.json(201, {"id": cycle_id, **strategy})
+
+    def create_study_response(self, payload: dict) -> None:
+        submission_id = str(payload.get("submission_id", "")).strip()
+        terac_submission_id = str(payload.get("terac_submission_id", "")).strip()
+        task_id = str(payload.get("task_id", "")).strip()
+        preference = str(payload.get("preference", ""))
+        ratings = [int(payload.get(key, 0)) for key in ("clarity_current", "clarity_deadline", "trust_current", "trust_deadline")]
+        concern = str(payload.get("concern", "")).strip()
+        improvement = str(payload.get("improvement", "")).strip()
+        if not all((submission_id, terac_submission_id, task_id)) or preference not in {"current", "deadline"}:
+            raise FailedClosed("Valid Terac submission identifiers and one message preference are required.")
+        if any(value not in range(1, 6) for value in ratings) or not (10 <= len(concern) <= 2000) or not (10 <= len(improvement) <= 2000):
+            raise FailedClosed("Use 1-5 ratings and provide at least 10 characters for both written answers.")
+        with connect() as db:
+            db.execute("INSERT OR IGNORE INTO study_responses VALUES(?,?,?,?,?,?,?,?,?,?,?)", (submission_id, terac_submission_id, task_id, preference, *ratings, concern, improvement, now()))
+        self.json(201, {"accepted": True})
 
 
 def re_full(pattern: str, value: str):

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Recoup message study</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/redesign.css"></head>
+<body><main>
+  <section class="intro compact"><div><p class="eyebrow">Terac research study</p><h1>Which message earns your trust?</h1><p>Compare two messages for a service that checks commercial lease CAM charges. Review the wording only. Do not enter private financial information.</p></div></section>
+  <form id="study" class="panel">
+    <div class="grid">
+      <article class="panel"><p class="eyebrow">Message A · Current</p><h2>Find and recover unsupported CAM charges.</h2><p>Upload your lease and CAM statement. Recoup verifies charges, protects deadlines, and runs the correction.</p></article>
+      <article class="panel"><p class="eyebrow">Message B · Deadline-led</p><h2>Your CAM objection window may be closing.</h2><p>Check your lease and annual statement before the deadline. Recoup verifies the charges and prepares the correction case.</p></article>
+    </div>
+    <label>Which message is clearer and more trustworthy?<select name="preference" required><option value="">Select one</option><option value="current">Message A · Current</option><option value="deadline">Message B · Deadline-led</option></select></label>
+    <div class="row"><label>Message A clarity (1-5)<input name="clarity_current" type="number" min="1" max="5" required></label><label>Message B clarity (1-5)<input name="clarity_deadline" type="number" min="1" max="5" required></label></div>
+    <div class="row"><label>Message A trust (1-5)<input name="trust_current" type="number" min="1" max="5" required></label><label>Message B trust (1-5)<input name="trust_deadline" type="number" min="1" max="5" required></label></div>
+    <label>What feels confusing, exaggerated, or unsafe?<input name="concern" minlength="10" maxlength="2000" required></label>
+    <label>What would make you comfortable starting a free eligibility check?<input name="improvement" minlength="10" maxlength="2000" required></label>
+    <p id="study-error" class="form-error" role="alert"></p><button class="primary" type="submit">Submit feedback</button>
+  </form>
+</main><div id="toast" role="status" aria-live="polite"></div><script src="/study.js"></script></body></html>
