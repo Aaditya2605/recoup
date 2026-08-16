@@ -4,14 +4,11 @@ services:
     runtime: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python app.py"
+    plan: free
     healthCheckPath: /api/state
     envVars:
       - key: PYTHON_VERSION
         value: 3.14.6
-      - key: RECOUP_DB
-        value: /var/data/recoup.db
-      - key: RECOUP_UPLOADS
-        value: /var/data/uploads
       - key: PIONEER_API_KEY
         sync: false
       - key: TERAC_API_KEY
@@ -36,7 +33,3 @@ services:
         sync: false
       - key: LINQ_WEBHOOK_SECRET
         sync: false
-    disk:
-      name: recoup-data
-      mountPath: /var/data
-      sizeGB: 1
