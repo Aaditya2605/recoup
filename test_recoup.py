@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
-from recoup import FailedClosed, calculate_audit, evidence, money, ratio, resend_email, run_audit, synthetic_documents, synthetic_extraction, terac_budget_ok, valid_email, verify_dodo_signature
+from recoup import FailedClosed, calculate_audit, evidence, linq_send_message, money, ratio, resend_email, run_audit, synthetic_documents, synthetic_extraction, terac_budget_ok, valid_email, valid_phone, verify_dodo_signature, verify_linq_signature
 
 
 class RecoupTest(unittest.TestCase):
@@ -44,6 +44,7 @@ class RecoupTest(unittest.TestCase):
         signature = base64.b64encode(hmac.new(raw_secret, message_id.encode() + b"." + timestamp.encode() + b"." + body, hashlib.sha256).digest()).decode()
         headers = {"webhook-id": message_id, "webhook-timestamp": timestamp, "webhook-signature": f"v1,{signature}"}
         verify_dodo_signature(body, headers, secret, current_time=2000000001)
+        verify_linq_signature(body, headers, secret, current_time=2000000001)
         with self.assertRaises(FailedClosed):
             verify_dodo_signature(body, {**headers, "webhook-signature": "v1,bad"}, secret, current_time=2000000001)
 
@@ -64,6 +65,21 @@ class RecoupTest(unittest.TestCase):
         self.assertEqual(request.headers["Idempotency-key"], "case-test")
         self.assertTrue(valid_email("landlord@example.com"))
         self.assertFalse(valid_email("not-an-email"))
+
+    @patch("recoup.urllib.request.urlopen")
+    def test_linq_message(self, urlopen):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"chat":{"id":"chat_test","message":{"id":"message_test","delivery_status":"queued","service":"iMessage"}}}'
+        urlopen.return_value = response
+        with patch.dict("os.environ", {"LINQ_API_KEY": "linq_test", "LINQ_FROM_NUMBER": "+14155550100"}):
+            result = linq_send_message("+14155550123", "Follow-up", "case-test")
+        self.assertEqual(result, {"chat_id": "chat_test", "message_id": "message_test", "status": "queued", "service": "iMessage"})
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(payload["to"], ["+14155550123"])
+        self.assertEqual(payload["message"]["idempotency_key"], "case-test")
+        self.assertTrue(valid_phone("+14155550123"))
+        self.assertFalse(valid_phone("415-555-0123"))
 
 
 if __name__ == "__main__":

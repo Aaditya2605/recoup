@@ -30,6 +30,12 @@ services:
         sync: false
       - key: RESEND_FROM_EMAIL
         sync: false
+      - key: LINQ_API_KEY
+        sync: false
+      - key: LINQ_FROM_NUMBER
+        sync: false
+      - key: LINQ_WEBHOOK_SECRET
+        sync: false
     disk:
       name: recoup-data
       mountPath: /var/data

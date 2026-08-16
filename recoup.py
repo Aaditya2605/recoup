@@ -37,6 +37,10 @@ def valid_email(value: object) -> bool:
     return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", str(value).strip()))
 
 
+def valid_phone(value: object) -> bool:
+    return bool(re.fullmatch(r"\+[1-9]\d{7,14}", str(value).strip()))
+
+
 class FailedClosed(ValueError):
     """The workflow cannot proceed safely from the available evidence."""
 
@@ -459,6 +463,49 @@ def resend_email(to: str, subject: str, text: str, idempotency_key: str) -> str:
     return str(result["id"])
 
 
+def linq_send_message(to: str, text: str, idempotency_key: str) -> dict[str, str]:
+    key = os.getenv("LINQ_API_KEY")
+    sender = os.getenv("LINQ_FROM_NUMBER")
+    if not key:
+        raise FailedClosed("LINQ_API_KEY is required.")
+    if not valid_phone(to):
+        raise FailedClosed("The landlord phone must use E.164 format, such as +14155550123.")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "Recoup/1.0"}
+    if not sender:
+        request = urllib.request.Request("https://api.linqapp.com/api/partner/v3/phone_numbers", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                numbers = json.load(response).get("phone_numbers", [])
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise FailedClosed(f"Linq phone-number lookup failed: {exc}") from exc
+        healthy = [item for item in numbers if item.get("reputation", {}).get("status", "HEALTHY") == "HEALTHY"]
+        sender = (healthy or numbers or [{}])[0].get("phone_number")
+    if not valid_phone(sender):
+        raise FailedClosed("Linq has no available sender phone number.")
+    payload = json.dumps({
+        "from": sender,
+        "to": [to],
+        "message": {"parts": [{"type": "text", "value": text}], "idempotency_key": idempotency_key},
+    }).encode()
+    request = urllib.request.Request("https://api.linqapp.com/api/partner/v3/chats", data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response).get("chat", {})
+    except urllib.error.HTTPError as exc:
+        try:
+            error = json.loads(exc.read())
+            detail = error.get("error", {}).get("message") or error.get("message") or str(exc)
+        except json.JSONDecodeError:
+            detail = str(exc)
+        raise FailedClosed(f"Linq message failed: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise FailedClosed(f"Linq message failed: {exc}") from exc
+    message = result.get("message", {})
+    if not result.get("id") or not message.get("id"):
+        raise FailedClosed("Linq returned an incomplete chat response.")
+    return {"chat_id": str(result["id"]), "message_id": str(message["id"]), "status": str(message.get("delivery_status", "pending")), "service": str(message.get("service", "auto"))}
+
+
 def dodo_checkout(case_id: str, tenant: str, email: str) -> dict[str, Any]:
     key = os.getenv("DODO_PAYMENTS_API_KEY")
     product_id = os.getenv("DODO_PAYMENTS_PRODUCT_ID")
@@ -495,19 +542,27 @@ def dodo_checkout(case_id: str, tenant: str, email: str) -> dict[str, Any]:
     return result
 
 
-def verify_dodo_signature(body: bytes, headers: dict[str, str], secret: str, *, current_time: float | None = None) -> str:
+def verify_webhook_signature(body: bytes, headers: dict[str, str], secret: str, provider: str, *, current_time: float | None = None) -> str:
     message_id = headers.get("webhook-id", "")
     timestamp = headers.get("webhook-timestamp", "")
     signatures = headers.get("webhook-signature", "").split()
     if not message_id or "." in message_id or not timestamp.isdigit() or abs((current_time or time.time()) - int(timestamp)) > 300:
-        raise FailedClosed("The Dodo webhook metadata is invalid.")
+        raise FailedClosed(f"The {provider} webhook metadata is invalid.")
     encoded_secret = secret[6:] if secret.startswith("whsec_") else secret
     try:
         key = base64.b64decode(encoded_secret)
     except ValueError as exc:
-        raise FailedClosed("The Dodo webhook key is invalid.") from exc
+        raise FailedClosed(f"The {provider} webhook key is invalid.") from exc
     signed = message_id.encode() + b"." + timestamp.encode() + b"." + body
     expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
     if not any(signature.startswith("v1,") and hmac.compare_digest(expected, signature[3:]) for signature in signatures):
-        raise FailedClosed("The Dodo webhook signature is invalid.")
+        raise FailedClosed(f"The {provider} webhook signature is invalid.")
     return message_id
+
+
+def verify_dodo_signature(body: bytes, headers: dict[str, str], secret: str, *, current_time: float | None = None) -> str:
+    return verify_webhook_signature(body, headers, secret, "Dodo", current_time=current_time)
+
+
+def verify_linq_signature(body: bytes, headers: dict[str, str], secret: str, *, current_time: float | None = None) -> str:
+    return verify_webhook_signature(body, headers, secret, "Linq", current_time=current_time)

@@ -25,6 +25,7 @@
           <label>Contact email<input name="email" type="email" autocomplete="email" required></label>
           <div class="row"><label>Country<select name="country"><option value="US">United States</option><option>Other</option></select></label><label>Lease type<select name="lease_type"><option>NNN retail</option><option>Other</option></select></label></div>
           <label>Landlord or manager email<input name="landlord_email" type="email" autocomplete="email" required><small>The signed notice copy goes to this address.</small></label>
+          <label>Landlord or manager phone<input name="landlord_phone" type="tel" autocomplete="tel" placeholder="+14155550123" pattern="\+[1-9][0-9]{7,14}"><small>Optional. Use international format for Linq follow-up.</small></label>
           <label>Case documents<input name="documents" type="file" accept=".pdf,.txt,.md,.csv" multiple required><small>Add the lease and annual CAM statement. Add a ledger if payments are missing.</small></label>
           <p id="intake-error" class="form-error" role="alert"></p>
           <button class="primary" type="submit">Check eligibility</button>

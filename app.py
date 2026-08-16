@@ -23,13 +23,16 @@ from recoup import (
     choose_distribution_strategy,
     dodo_checkout,
     eligibility,
+    linq_send_message,
     now,
     resend_email,
     run_audit,
     synthetic_documents,
     terac_budget_ok,
     verify_dodo_signature,
+    verify_linq_signature,
     valid_email,
+    valid_phone,
 )
 
 
@@ -210,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as db:
                     cases = [dict(row) for row in db.execute("SELECT id,tenant,email,state,synthetic,paid,created_at,updated_at FROM cases ORDER BY created_at DESC")]
                     cycles = [{**dict(row), "data": json.loads(row["data"])} for row in db.execute("SELECT * FROM distribution_cycles ORDER BY created_at DESC")]
-                return self.json(200, {"cases": cases, "distribution_cycles": cycles, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "email_configured": bool(os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
+                return self.json(200, {"cases": cases, "distribution_cycles": cycles, "payment_configured": bool(os.getenv("DODO_PAYMENTS_API_KEY") and os.getenv("DODO_PAYMENTS_PRODUCT_ID")), "email_configured": bool(os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL")), "linq_configured": bool(os.getenv("LINQ_API_KEY")), "pioneer_configured": bool(os.getenv("PIONEER_API_KEY")), "terac_configured": bool(os.getenv("TERAC_API_KEY"))})
             match = re_full(r"/api/cases/([a-f0-9]+)", path)
             if match:
                 with connect() as db:
@@ -226,6 +229,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/dodo/webhook":
                 return self.dodo_webhook()
+            if path == "/api/linq/webhook":
+                return self.linq_webhook()
             payload = self.read_json()
             if path == "/api/cases":
                 return self.create_case(payload)
@@ -233,7 +238,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_demo()
             if path == "/api/distribution/cycles":
                 return self.create_cycle(payload)
-            match = re_full(r"/api/cases/([a-f0-9]+)/(audit|authorize|sign|deliver|reply|outcome|pay)", path)
+            match = re_full(r"/api/cases/([a-f0-9]+)/(audit|authorize|sign|deliver|followup|reply|outcome|pay)", path)
             if match:
                 return self.case_action(match[1], match[2], payload)
             self.send_error(404)
@@ -255,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
             "state": "intake_incomplete",
             "synthetic": False,
             "paid": False,
-            "data": {"eligibility": check, "documents": documents, "landlord_email": str(payload.get("landlord_email", "")).strip()},
+            "data": {"eligibility": check, "documents": documents, "landlord_email": str(payload.get("landlord_email", "")).strip(), "landlord_phone": str(payload.get("landlord_phone", "")).strip()},
             "created_at": now(),
             "updated_at": now(),
         }
@@ -263,6 +268,8 @@ class Handler(BaseHTTPRequestHandler):
             raise FailedClosed("Tenant name and a valid contact email are required.")
         if not valid_email(case["data"]["landlord_email"]):
             raise FailedClosed("A valid landlord or manager email is required.")
+        if case["data"]["landlord_phone"] and not valid_phone(case["data"]["landlord_phone"]):
+            raise FailedClosed("The landlord phone must use E.164 format, such as +14155550123.")
         with connect() as db:
             db.execute("INSERT INTO cases VALUES(?,?,?,?,?,?,?,?,?)", (case["id"], case["tenant"], case["email"], case["state"], 0, 0, json.dumps(case["data"]), case["created_at"], case["updated_at"]))
             record_event(db, case_id=case_id, actor="customer", trigger="intake submitted", input_evidence={"document_kinds": list(documents)}, tool_call=None, output=check, decision="eligible" if check["eligible"] else "rejected", next_state=case["state"])
@@ -339,6 +346,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise FailedClosed("A pending action ID and delivery evidence are required.")
                 db.execute("UPDATE actions SET status='confirmed_external',external_evidence=? WHERE id=?", (evidence_text, action_id))
                 transition(db, case, "notice_sent", actor="delivery_webhook", trigger="notice delivery confirmed", evidence={"external_evidence": evidence_text}, tool={"action_id": action_id}, output={"external_status": "confirmed_external"})
+            elif verb == "followup":
+                if case["state"] not in {"notice_sent", "waiting_for_landlord_reply", "escalation_approved"}:
+                    raise FailedClosed("Confirmed notice delivery is required before landlord follow-up.")
+                phone = case["data"].get("landlord_phone", "")
+                if not valid_phone(phone):
+                    raise FailedClosed("This case has no valid landlord phone number.")
+                if case["state"] == "notice_sent":
+                    transition(db, case, "waiting_for_landlord_reply", actor="fulfillment_agent", trigger="notice delivery recorded", evidence={"action": "Linq follow-up"}, output={"waiting": True})
+                message = f"Recoup is following up on the CAM reconciliation notice from {case['tenant']}. Please reply with the current status or any questions. Reply STOP to opt out."
+                queued = action(db, case, "linq_message", {"to": phone, "text": message})
+                if queued["status"] == "pending_external":
+                    result = linq_send_message(phone, message, f"recoup-followup-{case_id}")
+                    db.execute("UPDATE actions SET status='accepted_external',external_evidence=? WHERE id=?", (json.dumps(result), queued["id"]))
+                    case["data"]["linq_chat_id"] = result["chat_id"]
+                    save_case(db, case)
+                    record_event(db, case_id=case_id, actor="fulfillment_agent", trigger="landlord follow-up accepted by Linq", input_evidence={"recipient": phone}, tool_call={"action_id": queued["id"], "provider": "Linq"}, output=result, decision="accepted; awaiting delivery webhook or reply", next_state=case["state"])
             elif verb == "reply":
                 if case["state"] not in {"notice_sent", "waiting_for_landlord_reply", "escalation_approved"}:
                     raise FailedClosed("A landlord reply is not expected in this state.")
@@ -394,6 +417,40 @@ class Handler(BaseHTTPRequestHandler):
             db.execute("UPDATE actions SET status='confirmed_external',external_evidence=? WHERE case_id=? AND kind='dodo_checkout' AND status='pending_external'", (payment.get("payment_id"), case_id))
             save_case(db, case)
             record_event(db, case_id=case_id, actor="dodo_webhook", trigger="payment succeeded", input_evidence=case["data"]["payment"], tool_call={"webhook_id": webhook_id}, output={"paid": True}, decision="signature, product, currency, and amount verified", next_state=case["state"])
+        self.json(200, {"received": True})
+
+    def linq_webhook(self) -> None:
+        secret = os.getenv("LINQ_WEBHOOK_SECRET")
+        if not secret:
+            raise FailedClosed("LINQ_WEBHOOK_SECRET is not configured.")
+        body = self.read_body()
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        webhook_id = verify_linq_signature(body, headers, secret)
+        event = json.loads(body)
+        event_type = event.get("event_type")
+        if event_type not in {"message.sent", "message.delivered", "message.read", "message.failed", "message.received"}:
+            return self.json(200, {"received": True, "ignored": True})
+        data = event.get("data", {})
+        chat_id = data.get("chat", {}).get("id") or data.get("chat_id")
+        text = "\n".join(part.get("value", "") for part in data.get("parts", []) if part.get("type") == "text").strip() or str(data.get("text", "")).strip()
+        with connect() as db:
+            if db.execute("SELECT 1 FROM actions WHERE kind='linq_webhook' AND idempotency_key=?", (webhook_id,)).fetchone():
+                return self.json(200, {"received": True, "duplicate": True})
+            case = next((get_case(db, row["id"]) for row in db.execute("SELECT id,data FROM cases") if json.loads(row["data"]).get("linq_chat_id") == chat_id), None)
+            if not case or (event_type == "message.received" and not text):
+                return self.json(200, {"received": True, "ignored": True})
+            db.execute("INSERT INTO actions(id,case_id,kind,idempotency_key,status,payload,external_evidence,created_at) VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, case["id"], "linq_webhook", webhook_id, "confirmed_external", json.dumps({"event_type": event_type}), webhook_id, now()))
+            if event_type == "message.received":
+                evidence = {"source": "Linq", "text": text, "at": now()}
+                case["data"].setdefault("replies", []).append(evidence)
+                save_case(db, case)
+                trigger, decision = "landlord message received", "requires review"
+            else:
+                evidence = {"message_id": data.get("id"), "status": event_type.removeprefix("message."), "at": now()}
+                status = "failed_external" if event_type == "message.failed" else "confirmed_external" if event_type in {"message.delivered", "message.read"} else "accepted_external"
+                db.execute("UPDATE actions SET status=? WHERE case_id=? AND kind='linq_message'", (status, case["id"]))
+                trigger, decision = f"Linq message {evidence['status']}", "failed" if event_type == "message.failed" else "externally confirmed"
+            record_event(db, case_id=case["id"], actor="linq_webhook", trigger=trigger, input_evidence=evidence, tool_call={"webhook_id": webhook_id, "provider": "Linq"}, output={"stored": True}, decision=decision, next_state=case["state"])
         self.json(200, {"received": True})
 
     def create_cycle(self, payload: dict) -> None:

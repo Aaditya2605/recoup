@@ -26,6 +26,7 @@ The synthetic case is always labeled. It is not evidence of a real customer, pay
 - `TERAC_API_KEY` identifies the existing founder-controlled Terac account. The local manager selects a job and enforces the $125 credit-only limit. Launch stays external until authenticated Terac tools are available.
 - Formal notices enter an idempotent `pending_external` outbox after customer authorization and signature. The case stays in `external_action_pending`. A certified-mail provider and delivery webhook are required before the system can record `notice_sent` as externally confirmed.
 - `RESEND_API_KEY` and `RESEND_FROM_EMAIL` send the signed courtesy copy to the landlord email entered at intake. Resend acceptance does not replace certified-mail delivery when the lease requires it.
+- `LINQ_API_KEY` sends an idempotent iMessage, RCS, or SMS follow-up to the optional landlord phone only after confirmed notice delivery. `/api/linq/webhook` verifies `LINQ_WEBHOOK_SECRET` and stores inbound landlord replies in the case ledger. Set `LINQ_FROM_NUMBER` to force one assigned line; otherwise the app selects a healthy assigned line.
 - Jurisdiction-specific professional and representation rules are not configured. Live cases that need legal or accounting judgment must stop for a qualified professional.
 
 ## Stored proof
