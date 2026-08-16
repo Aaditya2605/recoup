@@ -1,0 +1,12 @@
+{
+  "label": "synthetic evaluation only",
+  "deadline": "2026-03-16",
+  "claimed_actual": "14400.00",
+  "estimated_paid": "12000.00",
+  "stated_balance": "2400.00",
+  "verified_actual": "10500.00",
+  "verified_balance": "-1500.00",
+  "correction": "3900.00",
+  "finding_codes": ["allocation_share", "excluded_capital", "duplicate_admin"],
+  "notice_must_exclude_unverified_findings": true
+}

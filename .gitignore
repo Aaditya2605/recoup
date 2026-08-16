@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+recoup.db
+recoup.db-*
+uploads/
+.DS_Store

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Recoup | CAM charge recovery</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/redesign.css">
+</head>
+<body>
+  <header>
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">R</span>Recoup</a>
+    <nav aria-label="Primary"><button class="quiet active" data-view="cases">Cases</button><button class="quiet" data-view="distribution">Distribution</button></nav>
+    <span id="system-status" class="status">Checking system</span>
+  </header>
+  <main>
+    <section id="cases-view">
+      <div class="intro">
+        <div><p class="eyebrow">Managed CAM reconciliation</p><h1>Find and recover unsupported CAM charges.</h1><p>Upload your lease and CAM statement. Recoup verifies charges, protects deadlines, and runs the correction.</p></div>
+        <div class="hero-actions"><a class="primary" href="#intake">Check eligibility</a><button id="demo" class="secondary">Run sample case</button></div>
+      </div>
+      <div class="workspace-grid">
+        <form id="intake" class="panel">
+          <div class="panel-head"><div><h2>Check a case</h2><p>Free eligibility review</p></div><span>$499 if eligible</span></div>
+          <label>Tenant or company<input name="tenant" autocomplete="organization" required><small>Use the name shown on the lease.</small></label>
+          <label>Contact email<input name="email" type="email" autocomplete="email" required></label>
+          <div class="row"><label>Country<select name="country"><option value="US">United States</option><option>Other</option></select></label><label>Lease type<select name="lease_type"><option>NNN retail</option><option>Other</option></select></label></div>
+          <label>Landlord or manager contact<input name="landlord_contact" autocomplete="name"></label>
+          <label>Case documents<input name="documents" type="file" accept=".pdf,.txt,.md,.csv" multiple required><small>Add the lease and annual CAM statement. Add a ledger if payments are missing.</small></label>
+          <p id="intake-error" class="form-error" role="alert"></p>
+          <button class="primary" type="submit">Check eligibility</button>
+        </form>
+        <section class="panel cases-panel"><div class="panel-head"><div><h2>Active cases</h2><p>Review evidence, deadlines, and next actions.</p></div><span id="case-count">0 cases</span></div><div id="cases" class="list loading">Loading cases</div></section>
+      </div>
+      <section id="case-detail" class="panel detail hidden"></section>
+    </section>
+    <section id="distribution-view" class="hidden">
+      <div class="intro compact"><div><p class="eyebrow">Distribution manager</p><h1>Strategy follows measured evidence.</h1><p>The manager changes the target, channel, message, and Terac work within fixed policy and budget limits.</p></div><button id="new-cycle" class="primary">Plan next cycle</button></div>
+      <div id="cycles" class="grid"></div>
+    </section>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
