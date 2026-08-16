@@ -167,6 +167,22 @@ def action(db: sqlite3.Connection, case: dict, kind: str, payload: dict) -> dict
     return item
 
 
+def save_study_response(payload: dict) -> None:
+    submission_id = str(payload.get("submission_id", "")).strip()
+    terac_submission_id = str(payload.get("terac_submission_id", "")).strip()
+    task_id = str(payload.get("task_id", "")).strip()
+    preference = str(payload.get("preference", ""))
+    ratings = [int(payload.get(key, 0)) for key in ("clarity_current", "clarity_deadline", "trust_current", "trust_deadline")]
+    concern = str(payload.get("concern", "")).strip()
+    improvement = str(payload.get("improvement", "")).strip()
+    if not all((submission_id, terac_submission_id, task_id)) or preference not in {"current", "deadline"}:
+        raise FailedClosed("Valid Terac submission identifiers and one message preference are required.")
+    if any(value not in range(1, 6) for value in ratings) or not (10 <= len(concern) <= 2000) or not (10 <= len(improvement) <= 2000):
+        raise FailedClosed("Use 1-5 ratings and provide at least 10 characters for both written answers.")
+    with connect() as db:
+        db.execute("INSERT OR IGNORE INTO study_responses VALUES(?,?,?,?,?,?,?,?,?,?,?)", (submission_id, terac_submission_id, task_id, preference, *ratings, concern, improvement, now()))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Recoup/1"
 
@@ -485,19 +501,7 @@ class Handler(BaseHTTPRequestHandler):
         self.json(201, {"id": cycle_id, **strategy})
 
     def create_study_response(self, payload: dict) -> None:
-        submission_id = str(payload.get("submission_id", "")).strip()
-        terac_submission_id = str(payload.get("terac_submission_id", "")).strip()
-        task_id = str(payload.get("task_id", "")).strip()
-        preference = str(payload.get("preference", ""))
-        ratings = [int(payload.get(key, 0)) for key in ("clarity_current", "clarity_deadline", "trust_current", "trust_deadline")]
-        concern = str(payload.get("concern", "")).strip()
-        improvement = str(payload.get("improvement", "")).strip()
-        if not all((submission_id, terac_submission_id, task_id)) or preference not in {"current", "deadline"}:
-            raise FailedClosed("Valid Terac submission identifiers and one message preference are required.")
-        if any(value not in range(1, 6) for value in ratings) or not (10 <= len(concern) <= 2000) or not (10 <= len(improvement) <= 2000):
-            raise FailedClosed("Use 1-5 ratings and provide at least 10 characters for both written answers.")
-        with connect() as db:
-            db.execute("INSERT OR IGNORE INTO study_responses VALUES(?,?,?,?,?,?,?,?,?,?,?)", (submission_id, terac_submission_id, task_id, preference, *ratings, concern, improvement, now()))
+        save_study_response(payload)
         self.json(201, {"accepted": True})
 
 
